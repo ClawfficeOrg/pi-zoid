@@ -81,7 +81,22 @@ import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-nam
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
-import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
+import { syncSessionAnalytics } from "../../core/session-sync.ts";
+import {
+	pollSessionSyncDeviceToken,
+	SessionSyncApiError,
+	startSessionSyncDeviceFlow,
+} from "../../core/session-sync-api.ts";
+import {
+	getStableSessionSyncDeviceId,
+	loadSessionSyncState,
+	saveSessionSyncState,
+} from "../../core/session-sync-state.ts";
+import {
+	BUILTIN_SLASH_COMMANDS,
+	getVisibleBuiltinSlashCommands,
+	isSessionSyncFeatureEnabled,
+} from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
@@ -89,9 +104,11 @@ import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/cha
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
+import { openBrowser } from "../../utils/open-browser.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
+import { sleep } from "../../utils/sleep.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { ArminComponent } from "./components/armin.ts";
@@ -471,7 +488,7 @@ export class InteractiveMode {
 
 	private createBaseAutocompleteProvider(): AutocompleteProvider {
 		// Define commands for autocomplete
-		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.map((command) => ({
+		const slashCommands: SlashCommand[] = getVisibleBuiltinSlashCommands().map((command) => ({
 			name: command.name,
 			description: command.description,
 		}));
@@ -515,7 +532,7 @@ export class InteractiveMode {
 		}));
 
 		// Convert extension commands to SlashCommand format
-		const builtinCommandNames = new Set(slashCommands.map((c) => c.name));
+		const builtinCommandNames = new Set(BUILTIN_SLASH_COMMANDS.map((c) => c.name));
 		const extensionCommands: SlashCommand[] = this.session.extensionRunner
 			.getRegisteredCommands()
 			.filter((cmd) => !builtinCommandNames.has(cmd.name))
@@ -761,6 +778,8 @@ export class InteractiveMode {
 			}
 		});
 
+		this.maybeRunBackgroundSessionSync();
+
 		// Show startup warnings
 		const { migratedProviders, modelFallbackMessage, initialMessage, initialImages, initialMessages } = this.options;
 
@@ -906,6 +925,25 @@ export class InteractiveMode {
 		}
 
 		return undefined;
+	}
+
+	private maybeRunBackgroundSessionSync(): void {
+		const settings = this.settingsManager.getSessionSyncSettings();
+		if (!isSessionSyncFeatureEnabled() || !settings.enabled || process.env.PI_OFFLINE) return;
+
+		void loadSessionSyncState(getAgentDir())
+			.then((state) => {
+				const lastAttemptTime = state.lastAttemptAt ? new Date(state.lastAttemptAt).getTime() : 0;
+				if (
+					Number.isFinite(lastAttemptTime) &&
+					Date.now() - lastAttemptTime < settings.intervalHours * 60 * 60 * 1000
+				) {
+					return undefined;
+				}
+				return syncSessionAnalytics({ settingsManager: this.settingsManager });
+			})
+			.then(() => undefined)
+			.catch(() => undefined);
 	}
 
 	private reportInstallTelemetry(version: string): void {
@@ -2537,6 +2575,15 @@ export class InteractiveMode {
 			if (text === "/session") {
 				this.handleSessionCommand();
 				this.editor.setText("");
+				return;
+			}
+			if (text === "/session-sync" || text.startsWith("/session-sync ")) {
+				this.editor.setText("");
+				if (!isSessionSyncFeatureEnabled()) {
+					this.showWarning("Session sync is in early access. Set PI_SESSION_SYNC=1 to use /session-sync.");
+					return;
+				}
+				await this.handleSessionSyncCommand(text);
 				return;
 			}
 			if (text === "/changelog") {
@@ -5263,6 +5310,82 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
 		this.ui.requestRender();
+	}
+
+	private async handleSessionSyncCommand(text: string): Promise<void> {
+		if (!isSessionSyncFeatureEnabled()) {
+			this.showWarning("Session sync is in early access. Set PI_SESSION_SYNC=1 to use /session-sync.");
+			return;
+		}
+		if (text !== "/session-sync") {
+			this.showWarning("Usage: /session-sync");
+			return;
+		}
+		if (!(await this.ensureSessionSyncAuthenticated())) return;
+		await this.runSessionSyncNow();
+	}
+
+	private async runSessionSyncNow(): Promise<void> {
+		this.showStatus("Running session sync...");
+		const result = await syncSessionAnalytics({ settingsManager: this.settingsManager });
+		if (result.status === "uploaded") {
+			this.showStatus(
+				`Session sync uploaded ${result.recordsSent?.toLocaleString() ?? 0} records (${result.compressedBytes?.toLocaleString() ?? 0} compressed bytes)`,
+			);
+			return;
+		}
+		if (result.status === "no_changes") {
+			this.showStatus("Session sync found no changes");
+			return;
+		}
+		if (result.status === "not_authenticated") {
+			this.showWarning("Session sync is not authenticated. Run /session-sync to log in and sync.");
+			return;
+		}
+		if (result.status === "already_running") {
+			this.showWarning("Session sync is already running in another process.");
+			return;
+		}
+		this.showError(result.error ?? "Session sync failed");
+	}
+
+	private async ensureSessionSyncAuthenticated(): Promise<boolean> {
+		const existingState = await loadSessionSyncState(getAgentDir());
+		if (existingState.refreshToken) return true;
+
+		const deviceId = getStableSessionSyncDeviceId(this.settingsManager);
+		await this.settingsManager.flush();
+		this.showStatus("Starting session sync login...");
+		const flow = await startSessionSyncDeviceFlow(deviceId).catch((error: unknown) => {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return undefined;
+		});
+		if (!flow) return false;
+		openBrowser(flow.verification_uri_complete);
+		this.showStatus(`Opened ${flow.verification_uri_complete}. Waiting for approval...`);
+		let intervalMs = Math.max(1, flow.interval) * 1000;
+		const deadline = Date.now() + flow.expires_in * 1000;
+		while (Date.now() < deadline) {
+			await sleep(intervalMs);
+			try {
+				const token = await pollSessionSyncDeviceToken(flow.device_code);
+				const state = await loadSessionSyncState(getAgentDir());
+				state.refreshToken = token.refresh_token;
+				await saveSessionSyncState(state, getAgentDir());
+				this.showStatus("Session sync login complete");
+				return true;
+			} catch (error) {
+				if (error instanceof SessionSyncApiError && error.errorCode === "authorization_pending") continue;
+				if (error instanceof SessionSyncApiError && error.errorCode === "slow_down") {
+					intervalMs += 1000;
+					continue;
+				}
+				this.showError(error instanceof Error ? error.message : String(error));
+				return false;
+			}
+		}
+		this.showWarning("Session sync login expired. Run /session-sync again.");
+		return false;
 	}
 
 	private handleChangelogCommand(): void {

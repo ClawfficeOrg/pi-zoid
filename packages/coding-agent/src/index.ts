@@ -191,6 +191,35 @@ export {
 	type PromptTemplate,
 } from "./core/sdk.ts";
 export {
+	hashSessionAnalyticsString,
+	type ProjectSessionAnalyticsOptions,
+	type ProjectSessionHeaderAnalyticsOptions,
+	projectSessionEntryForAnalytics,
+	projectSessionForAnalytics,
+	projectSessionHeaderForAnalytics,
+	SESSION_ANALYTICS_SCHEMA_VERSION,
+	type SessionAnalyticsContentStats,
+	type SessionAnalyticsEntryRecord,
+	type SessionAnalyticsRecord,
+	type SessionAnalyticsSessionRecord,
+	type SessionAnalyticsUsage,
+} from "./core/session-analytics.ts";
+export {
+	type BuildSessionAnalyticsUploadOptions,
+	type BuildSessionAnalyticsUploadResult,
+	buildSessionAnalyticsUpload,
+} from "./core/session-analytics-reader.ts";
+export {
+	type DiscoveredSession,
+	type DiscoverSessionFilesOptions,
+	type DiscoverSessionsOptions,
+	discoverSessionFiles,
+	discoverSessions,
+	type SessionDiscoveryPhase,
+	type SessionDiscoveryProgress,
+	type SessionDiscoveryProgressCallback,
+} from "./core/session-discovery.ts";
+export {
 	type BranchSummaryEntry,
 	buildSessionContext,
 	type CompactionEntry,
@@ -214,11 +243,60 @@ export {
 	type ThinkingLevelChangeEntry,
 } from "./core/session-manager.ts";
 export {
+	type SessionSyncResult,
+	type SessionSyncStatus,
+	type SyncSessionAnalyticsOptions,
+	syncSessionAnalytics,
+} from "./core/session-sync.ts";
+export {
+	DEFAULT_PI_DEV_URL,
+	getSessionSyncWatermark,
+	pollSessionSyncDeviceToken,
+	refreshSessionSyncAccessToken,
+	SESSION_SYNC_CLIENT_ID,
+	SESSION_SYNC_SCOPE,
+	SessionSyncApiError,
+	type SessionSyncApiOptions,
+	type SessionSyncDeviceFlowResponse,
+	type SessionSyncFetch,
+	type SessionSyncTokenResponse,
+	type SessionSyncUploadResponse,
+	type SessionSyncWatermarkResponse,
+	startSessionSyncDeviceFlow,
+	type UploadSessionAnalyticsOptions,
+	uploadSessionAnalytics,
+} from "./core/session-sync-api.ts";
+export {
+	type BuildSessionSyncPayloadsOptions,
+	buildSessionSyncPayloads,
+	compareSessionAnalyticsRecords,
+	getSessionAnalyticsRecordTimestamp,
+	SESSION_SYNC_CONTENT_ENCODING,
+	SESSION_SYNC_MAX_COMPRESSED_BYTES,
+	SESSION_SYNC_MAX_DECOMPRESSED_BYTES,
+	type SessionSyncPayload,
+	serializeSessionAnalyticsNdjson,
+	sortSessionAnalyticsRecords,
+} from "./core/session-sync-payload.ts";
+export {
+	getSessionSyncStatePaths,
+	getStableSessionSyncDeviceId,
+	loadSessionSyncState,
+	type SessionSyncLockResult,
+	type SessionSyncState,
+	type SessionSyncStatePaths,
+	saveSessionSyncState,
+	updateSessionSyncState,
+	withSessionSyncLock,
+} from "./core/session-sync-state.ts";
+export {
 	type CompactionSettings,
 	type ImageSettings,
 	type PackageSource,
 	type RetrySettings,
+	type SessionSyncSettings,
 	SettingsManager,
+	type TelemetrySettings,
 } from "./core/settings-manager.ts";
 // Skills
 export {

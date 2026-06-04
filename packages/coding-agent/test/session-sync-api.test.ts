@@ -1,0 +1,129 @@
+import { Buffer } from "node:buffer";
+import { describe, expect, it } from "vitest";
+import {
+	getSessionSyncWatermark,
+	refreshSessionSyncAccessToken,
+	SessionSyncApiError,
+	startSessionSyncDeviceFlow,
+	uploadSessionAnalytics,
+} from "../src/core/session-sync-api.ts";
+
+function jsonResponse(body: unknown, status = 200): Response {
+	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+describe("session sync api", () => {
+	it("starts the OAuth device flow with the session sync scope", async () => {
+		let request: Request | undefined;
+		const fetchMock: typeof fetch = async (input, init) => {
+			request = new Request(input, init);
+			return jsonResponse({
+				device_code: "pigd_1",
+				user_code: "ABCD-EFGH",
+				verification_uri: "https://pi.dev/pair",
+				verification_uri_complete: "https://pi.dev/pair?code=ABCD-EFGH",
+				expires_in: 300,
+				interval: 2,
+			});
+		};
+
+		const response = await startSessionSyncDeviceFlow("00000000-0000-4000-8000-000000000000", {
+			baseUrl: "https://example.test/",
+			fetch: fetchMock,
+		});
+
+		expect(response.device_code).toBe("pigd_1");
+		expect(request?.url).toBe("https://example.test/api/oauth/device");
+		expect(request?.method).toBe("POST");
+		const body = new URLSearchParams(await request?.text());
+		expect(body.get("client_id")).toBe("pi-coding-agent");
+		expect(body.get("scope")).toBe("session_sync offline_access");
+		expect(body.get("device_id")).toBe("00000000-0000-4000-8000-000000000000");
+	});
+
+	it("refreshes tokens and reads watermarks", async () => {
+		const urls: string[] = [];
+		const fetchMock: typeof fetch = async (input, init) => {
+			const request = new Request(input, init);
+			urls.push(request.url);
+			if (request.url.endsWith("/api/oauth/token")) {
+				return jsonResponse({
+					token_type: "Bearer",
+					access_token: "access-2",
+					refresh_token: "refresh-2",
+					expires_in: 86400,
+					scope: "session_sync offline_access",
+				});
+			}
+			expect(request.headers.get("Authorization")).toBe("Bearer access-2");
+			return jsonResponse({ ok: true, watermark: "2026-01-01T00:00:00.000Z" });
+		};
+
+		const token = await refreshSessionSyncAccessToken("refresh-1", {
+			baseUrl: "https://example.test",
+			fetch: fetchMock,
+		});
+		const watermark = await getSessionSyncWatermark(token.access_token, "device-1", {
+			baseUrl: "https://example.test",
+			fetch: fetchMock,
+		});
+
+		expect(token.refresh_token).toBe("refresh-2");
+		expect(watermark.watermark).toBe("2026-01-01T00:00:00.000Z");
+		expect(urls).toEqual([
+			"https://example.test/api/oauth/token",
+			"https://example.test/analytics/sessions/device-1",
+		]);
+	});
+
+	it("uploads compressed NDJSON with sync headers and surfaces API errors", async () => {
+		let request: Request | undefined;
+		const fetchMock: typeof fetch = async (input, init) => {
+			request = new Request(input, init);
+			return jsonResponse(
+				{
+					ok: true,
+					records_received: 1,
+					first_record_timestamp: "2026-01-01T00:00:00.000Z",
+					last_record_timestamp: "2026-01-01T00:00:00.000Z",
+					received_bytes: 10,
+					watermark: "2026-01-02T00:00:00.000Z",
+				},
+				201,
+			);
+		};
+
+		const response = await uploadSessionAnalytics({
+			baseUrl: "https://example.test",
+			fetch: fetchMock,
+			accessToken: "access-1",
+			deviceId: "device-1",
+			watermark: "2026-01-02T00:00:00.000Z",
+			idempotencyKey: "retry-key",
+			body: Buffer.from("payload"),
+			contentEncoding: "zstd",
+		});
+
+		expect(response.records_received).toBe(1);
+		expect(request?.headers.get("Authorization")).toBe("Bearer access-1");
+		expect(request?.headers.get("Content-Type")).toBe("application/x-ndjson");
+		expect(request?.headers.get("Content-Encoding")).toBe("zstd");
+		expect(request?.headers.get("Pi-Sync-Watermark")).toBe("2026-01-02T00:00:00.000Z");
+		expect(request?.headers.get("Idempotency-Key")).toBe("retry-key");
+
+		const failingFetch: typeof fetch = async () =>
+			jsonResponse({ ok: false, error: "invalid_payload", description: "bad line" }, 400);
+		await expect(
+			uploadSessionAnalytics({
+				baseUrl: "https://example.test",
+				fetch: failingFetch,
+				accessToken: "access-1",
+				deviceId: "device-1",
+				watermark: "2026-01-02T00:00:00.000Z",
+				idempotencyKey: "retry-key",
+				body: Buffer.from("payload"),
+				contentEncoding: "zstd",
+			}),
+		).rejects.toMatchObject(new SessionSyncApiError(400, "invalid_payload", "bad line"));
+	});
+});

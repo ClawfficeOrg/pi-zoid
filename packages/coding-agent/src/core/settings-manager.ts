@@ -57,6 +57,15 @@ export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
 }
 
+export interface TelemetrySettings {
+	sessionSyncDeviceId?: string;
+}
+
+export interface SessionSyncSettings {
+	enabled?: boolean;
+	intervalHours?: number;
+}
+
 export type TransportSetting = Transport;
 
 /**
@@ -110,6 +119,8 @@ export interface Settings {
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
+	telemetry?: TelemetrySettings;
+	sessionSync?: SessionSyncSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
@@ -1087,5 +1098,28 @@ export class SettingsManager {
 		this.globalSettings.warnings = { ...warnings };
 		this.markModified("warnings");
 		this.save();
+	}
+
+	getSessionSyncDeviceId(): string | undefined {
+		const deviceId = this.settings.telemetry?.sessionSyncDeviceId;
+		return deviceId && /^[0-9a-fA-F-]{36}$/.test(deviceId) ? deviceId : undefined;
+	}
+
+	setSessionSyncDeviceId(deviceId: string): void {
+		if (!this.globalSettings.telemetry) {
+			this.globalSettings.telemetry = {};
+		}
+		this.globalSettings.telemetry.sessionSyncDeviceId = deviceId;
+		this.markModified("telemetry", "sessionSyncDeviceId");
+		this.save();
+	}
+
+	getSessionSyncSettings(): { enabled: boolean; intervalHours: number } {
+		const intervalHours = this.settings.sessionSync?.intervalHours;
+		return {
+			enabled: this.settings.sessionSync?.enabled ?? false,
+			intervalHours:
+				typeof intervalHours === "number" && Number.isFinite(intervalHours) ? Math.max(1, intervalHours) : 24,
+		};
 	}
 }
